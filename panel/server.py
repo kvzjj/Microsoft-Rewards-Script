@@ -1110,6 +1110,42 @@ SKIP_ENV = {"PATH", "HOSTNAME", "HOME", "LANG", "PWD", "SHLVL", "TERM", "LC_ALL"
             "GPG_KEY", "PYTHON_VERSION", "NODE_VERSION", "YARN_VERSION"}
 
 
+def apply_cron_local(cron, enabled):
+    """不依赖 docker CLI：把定时直接写进容器 crontab 并让 cron 重载。
+    兼容 Debian 系（crontab 命令/ spool 目录）与 Alpine（/etc/crontabs/root）。"""
+    text = ("PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\n"
+            "TZ=Asia/Shanghai\n")
+    if enabled:
+        text += (f"{cron} /bin/bash /usr/src/microsoft-rewards-script/scripts/docker/run_daily.sh "
+                 ">> /proc/1/fd/1 2>&1\n")
+    err = None
+    try:
+        r = subprocess.run(["crontab", "-"], input=text.encode(), timeout=15,
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        if r.returncode != 0:
+            err = (r.stderr or b"").decode(errors="ignore")[:120]
+    except Exception as e:
+        err = str(e)[:120]
+    if err:
+        for path in ("/etc/crontabs/root", "/var/spool/cron/crontabs/root"):
+            try:
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(text)
+                err = None
+                break
+            except Exception as e:
+                err = str(e)[:120]
+    if err:
+        return {"ok": False, "err": err}
+    for cmd in (["pkill", "-HUP", "-x", "cron"], ["pkill", "-HUP", "-x", "crond"]):
+        try:
+            subprocess.run(cmd, timeout=8, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
+    return {"ok": True, "cron": cron if enabled else "disabled"}
+
+
 def recreate_in_container(image, timeout=300):
     """一体化镜像内的「重建容器」：用 docker CLI 读自身规格，交给一个脱离本容器的
     短命容器去 rm + run，避免把自己杀掉时动作只做了一半。"""
@@ -2680,9 +2716,17 @@ class Handler(BaseHTTPRequestHandler):
                 # 从此全局只有「容器 cron」一个定时器（面板自身的定时线程永久停用）。
                 set_env_key("CRON_SCHEDULE", cfg["cron"])
                 set_env_key("DISABLE_SCHEDULE", "0" if cfg["enabled"] else "1")
+                # 先直接在容器内落 crontab（无 docker CLI 的裸一体化镜像靠这条立即生效）
+                local = apply_cron_local(cfg["cron"], cfg["enabled"])
                 res = recreate_in_container(PANEL_IMAGE)
+                if res.get("code") == 0 and local.get("ok"):
+                    msg = "已写入容器 cron 并重建，唯一调度生效"
+                elif local.get("ok"):
+                    msg = "已直接写入容器 crontab 并立即生效（本机无需重建）"
+                else:
+                    msg = "写入容器 crontab 失败：" + str(local.get("err") or res.get("err") or "未知")
                 return self.send_json(200, {"ok": True, "schedule": cfg, "rebuild": res,
-                                            "message": "已写入容器 cron 并重建，唯一调度生效"})
+                                            "applied": local, "message": msg})
             return self.send_json(200, {"ok": True, "schedule": cfg})
 
         if p == "/panel/notify" and method == "PUT":
