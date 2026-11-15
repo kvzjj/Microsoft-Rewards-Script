@@ -1110,6 +1110,30 @@ SKIP_ENV = {"PATH", "HOSTNAME", "HOME", "LANG", "PWD", "SHLVL", "TERM", "LC_ALL"
             "GPG_KEY", "PYTHON_VERSION", "NODE_VERSION", "YARN_VERSION"}
 
 
+def cron_state():
+    """读「真实生效」的调度：容器 crontab 实际行 > env.list 持久值 > 进程环境变量。
+    保存计划只改 env.list 与 crontab，进程环境变量不会变，所以不能只看 os.environ。"""
+    try:
+        out = subprocess.run(["crontab", "-l"], capture_output=True, timeout=8).stdout.decode(errors="ignore")
+        for line in out.splitlines():
+            ln = line.strip()
+            if ln and not ln.startswith("#") and "run_daily.sh" in ln:
+                return {"cron": " ".join(ln.split()[:5]), "on": True}
+        if out is not None:
+            env_file = os.path.join(DATA_DIR, "env.list") if "DATA_DIR" in globals() else "/opt/data/env.list"
+            try:
+                for l in open(env_file, encoding="utf-8", errors="ignore"):
+                    if l.startswith("CRON_SCHEDULE="):
+                        return {"cron": l.split("=", 1)[1].strip(), "on": False}
+            except Exception:
+                pass
+            return {"cron": "", "on": False}
+    except Exception:
+        pass
+    cron = os.environ.get("CRON_SCHEDULE", "")
+    return {"cron": cron, "on": os.environ.get("DISABLE_SCHEDULE", "0") not in ("1", "true", "yes")}
+
+
 def apply_cron_local(cron, enabled):
     """不依赖 docker CLI：把定时直接写进容器 crontab 并让 cron 重载。
     兼容 Debian 系（crontab 命令/ spool 目录）与 Alpine（/etc/crontabs/root）。"""
@@ -2177,9 +2201,11 @@ class Handler(BaseHTTPRequestHandler):
         if p == "/panel/schedule":
             d = load_json(SCHED, {"enabled": False, "cron": "0 7 * * *"})
             if isinstance(d, dict):
-                # 面板自身不再定时（避免与容器 cron 双跑）；这里附上容器真实调度供前端展示
-                d["cron"] = os.environ.get("CRON_SCHEDULE", "")
-                d["cronOn"] = os.environ.get("DISABLE_SCHEDULE", "0") not in ("1", "true", "yes")
+                # 回显必须取「真实生效」的调度（crontab/env.list），否则保存后刷新还是旧值
+                st = cron_state()
+                d["cron"] = st["cron"]
+                d["cronOn"] = st["on"]
+                d["enabled"] = st["on"]
             return self.send_json(200, d)
 
         if p == "/panel/version":
@@ -2716,6 +2742,9 @@ class Handler(BaseHTTPRequestHandler):
                 # 从此全局只有「容器 cron」一个定时器（面板自身的定时线程永久停用）。
                 set_env_key("CRON_SCHEDULE", cfg["cron"])
                 set_env_key("DISABLE_SCHEDULE", "0" if cfg["enabled"] else "1")
+                # 进程内环境同步，保证同一个进程后续 GET 立刻看到新值
+                os.environ["CRON_SCHEDULE"] = cfg["cron"]
+                os.environ["DISABLE_SCHEDULE"] = "0" if cfg["enabled"] else "1"
                 # 先直接在容器内落 crontab（无 docker CLI 的裸一体化镜像靠这条立即生效）
                 local = apply_cron_local(cfg["cron"], cfg["enabled"])
                 res = recreate_in_container(PANEL_IMAGE)
