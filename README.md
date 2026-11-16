@@ -362,6 +362,15 @@ docker run -d --name ms-rewards \
 > `zstd -d ms-rewards-v5-cn.tar.zst -c | docker load`.
 > Or pull the mirrored copy from Docker Hub, no login required: `docker pull docker.io/wangxiangya/ms-rewards-v5:5-cn`
 
+**Multi-arch (amd64 + arm64).** `:5-cn`, `:<version>-cn`, `:5-cn-allinone`, `:5-cn-allinone-docker` and the
+panel image are multi-arch manifests, so a plain `docker pull` picks the right architecture on ARM boxes
+(Raspberry Pi 4/5, RK3588, Docker Desktop on Apple silicon). Per-arch tags exist too:
+`:5-cn-amd64` / `:5-cn-arm64`. `docker buildx imagetools inspect <image>` shows the manifest.
+
+No manual browser install on arm64: patchright resolves `chrome-headless-shell-linux-arm64` for
+`debian12-arm64`, and the slim layer matches `chrome-headless-shell-linux*` so one Dockerfile serves both
+arches. To build both locally: `./deploy/build-multiarch.sh` (`--push` to publish, `--only arm64` for one arch).
+
 ### Panel
 
 A single-file, dependency-free control panel for the running container, built for phones as much

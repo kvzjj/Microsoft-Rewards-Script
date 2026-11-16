@@ -17,8 +17,8 @@ RUN set -eux; \
     cd /usr/src/microsoft-rewards-script; \
     # 补丁必须已经进入编译产物，否则构建出来的镜像在国内依然是 0 分
     grep -rq 'isBingHost' dist/ || { echo 'ERROR: dist 里没有 isBingHost，补丁没进构建'; exit 1; }; \
-    rm -rf node_modules/patchright-core/.local-browsers/chromium-1248 \
-           node_modules/patchright-core/.local-browsers/ffmpeg-1013 \
+    rm -rf node_modules/patchright-core/.local-browsers/chromium-[0-9]* \
+           node_modules/patchright-core/.local-browsers/ffmpeg-[0-9]* \
            node_modules/typescript \
            node_modules/@types \
            node_modules/caniuse-lite \
@@ -35,9 +35,9 @@ RUN set -eux; \
            /usr/share/fonts/truetype/noto/NotoColorEmoji.ttf \
            /usr/share/fonts/truetype/noto/NotoColorEmoji*; \
     find node_modules/patchright-core/.local-browsers -type d -name locales -exec sh -c 'find "$1" -type f ! -name "zh-CN.pak" ! -name "en-US.pak" -delete' _ {} \; ; \
-    rm -rf node_modules/patchright-core/.local-browsers/*/chrome-headless-shell-linux64/swiftshader; \
-    # 瘦身后必须还能跑，缺文件立刻失败而不是等线上 0 分
-    test -x node_modules/patchright-core/.local-browsers/chromium_headless_shell-1248/chrome-headless-shell-linux64/chrome-headless-shell; \
+    rm -rf node_modules/patchright-core/.local-browsers/*/chrome-headless-shell-linux*/swiftshader; \
+    # 瘦身后必须还能跑，缺文件立刻失败而不是等线上 0 分（目录名随架构变化：linux64 / linux-arm64）
+    test -x node_modules/patchright-core/.local-browsers/chromium_headless_shell-[0-9]*/chrome-headless-shell-linux*/chrome-headless-shell; \
     test -f dist/index.js; \
     du -sh node_modules /usr/share/fonts /usr/local
 

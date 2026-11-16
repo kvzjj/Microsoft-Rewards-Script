@@ -3,9 +3,15 @@ name: CN Patched Image
 # 在 v5 源码上打「cn.bing.com 兼容」补丁，构建后**瘦身拍扁**再推送：
 #   ghcr.io/<repo>:5-cn 与 :<version>-cn   （单层，约 763 MB；完整版 1.34 GB）
 #
+# 多架构：linux/amd64 + linux/arm64
+#   arm64 在 x64 runner 上走 QEMU；chromium 由 patchright 按 debian12-arm64 自动取
+#   chrome-headless-shell-linux-arm64，不需要改 Dockerfile 的下载逻辑。
+#
 # 瘦身两步走，顺序不能反（第二步才是真正减体积的那步）：
-#   1) .github/docker/Dockerfile.slim  删除 chromium-1248 / ffmpeg / npm / 文档字体等
+#   1) .github/docker/Dockerfile.slim  删 chromium-* / ffmpeg-* / npm / 文档字体（路径按架构通配）
 #   2) .github/scripts/flatten-image.sh export|import 拍扁成单层，否则删除只是白洞、体积不降
+#
+# 每个架构单独拍扁、单独推 <tag>-<arch>，最后由 merge 作业用 imagetools 拼多架构 manifest。
 
 on:
     push:
@@ -38,9 +44,13 @@ env:
 
 jobs:
     build:
-        name: Build CN-patched slim image
+        name: Build CN-patched slim image (${{ matrix.arch }})
         runs-on: ubuntu-24.04
-        timeout-minutes: 60
+        timeout-minutes: 120
+        strategy:
+            fail-fast: false
+            matrix:
+                arch: [amd64, arm64]
         steps:
             - uses: actions/checkout@v4
               with:
@@ -64,6 +74,11 @@ jobs:
                   grep -q 'export function isBingHost' src/constants/urls.ts
                   echo "补丁已应用（isBingHost 就位）"
 
+            # arm64 在 x64 runner 上需要 QEMU；amd64 装了也无害
+            - uses: docker/setup-qemu-action@v3
+              with:
+                  platforms: arm64
+
             - uses: docker/setup-buildx-action@v3
 
             - uses: docker/login-action@v3
@@ -72,37 +87,91 @@ jobs:
                   username: ${{ github.actor }}
                   password: ${{ secrets.GITHUB_TOKEN }}
 
-            - name: Build full image (patched)
+            - name: Build full image (patched, ${{ matrix.arch }})
               uses: docker/build-push-action@v6
               with:
                   context: .
                   push: false
                   load: true
-                  platforms: linux/amd64
+                  platforms: linux/${{ matrix.arch }}
                   tags: local/msr:cn-build
-                  cache-from: type=gha,version=2,scope=cn-image
-                  cache-to: type=gha,version=2,scope=cn-image,mode=max
+                  cache-from: type=gha,version=2,scope=cn-image-${{ matrix.arch }}
+                  cache-to: type=gha,version=2,scope=cn-image-${{ matrix.arch }},mode=max
 
-            - name: Strip runtime-unused files
+            - name: Strip runtime-unused files (${{ matrix.arch }})
               run: |
                   docker build \
+                    --platform linux/${{ matrix.arch }} \
                     --build-arg BASE_IMAGE=local/msr:cn-build \
                     --label "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
                     --label "org.opencontainers.image.version=${{ steps.ver.outputs.version }}-cn" \
                     --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
                     --label "com.wangixangya.patch=bing-origin-cn" \
+                    --label "com.wangixangya.arch=${{ matrix.arch }}" \
                     -f .github/docker/Dockerfile.slim \
                     -t local/msr:cn-slim .
-                  echo "瘦身层: $(docker image inspect local/msr:cn-slim --format '{{.Size}}' | awk '{printf "%.0f MB", $1/1024/1024}')（未拍扁，仍含白洞）"
+                  echo "瘦身层[${{ matrix.arch }}]: $(docker image inspect local/msr:cn-slim --format '{{.Size}}' | awk '{printf "%.0f MB", $1/1024/1024}')（未拍扁，仍含白洞）"
 
-            - name: Flatten to a single layer
+            - name: Flatten to a single layer (${{ matrix.arch }})
               run: |
                   chmod +x .github/scripts/flatten-image.sh
                   .github/scripts/flatten-image.sh local/msr:cn-slim \
-                    "$IMAGE:5-cn" "$IMAGE:${{ steps.ver.outputs.version }}-cn"
+                    "$IMAGE:5-cn-${{ matrix.arch }}" \
+                    "$IMAGE:${{ steps.ver.outputs.version }}-cn-${{ matrix.arch }}"
 
-            - name: Push slim image
-              run: docker push --all-tags "$IMAGE"
+            - name: Push slim image (${{ matrix.arch }})
+              run: |
+                  set -e
+                  docker push "$IMAGE:5-cn-${{ matrix.arch }}"
+                  docker push "$IMAGE:${{ steps.ver.outputs.version }}-cn-${{ matrix.arch }}"
+
+            - name: Report (${{ matrix.arch }})
+              run: |
+                  SIZE=$(docker image inspect "$IMAGE:5-cn-${{ matrix.arch }}" --format '{{.Size}}')
+                  MB=$(awk -v s="$SIZE" 'BEGIN{printf "%.0f", s/1024/1024}')
+                  echo "最终镜像[${{ matrix.arch }}]: ${MB} MB（单层拍扁）"
+
+    merge:
+        name: Merge multi-arch manifest
+        needs: build
+        runs-on: ubuntu-24.04
+        timeout-minutes: 20
+        if: ${{ needs.build.result == 'success' }}
+        steps:
+            - uses: actions/checkout@v4
+              with:
+                  ref: ${{ github.sha }}
+                  persist-credentials: false
+
+            - uses: actions/setup-node@v4
+              with:
+                  node-version: 24
+
+            - name: Resolve image name
+              run: echo "IMAGE=${REGISTRY}/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+
+            - name: Read version
+              id: ver
+              run: echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
+
+            - uses: docker/setup-buildx-action@v3
+
+            - uses: docker/login-action@v3
+              with:
+                  registry: ${{ env.REGISTRY }}
+                  username: ${{ github.actor }}
+                  password: ${{ secrets.GITHUB_TOKEN }}
+
+            - name: Combine per-arch tags into multi-arch manifests (GHCR)
+              run: |
+                  set -e
+                  for TAG in "5-cn" "${{ steps.ver.outputs.version }}-cn"; do
+                    docker buildx imagetools create \
+                      -t "$IMAGE:${TAG}" \
+                      "$IMAGE:${TAG}-amd64" \
+                      "$IMAGE:${TAG}-arm64"
+                    echo "已合并 $IMAGE:${TAG}（amd64 + arm64）"
+                  done
 
             - name: Login to Docker Hub
               if: env.DOCKERHUB_TOKEN != ''
@@ -112,48 +181,49 @@ jobs:
                   username: ${{ env.DOCKERHUB_USERNAME }}
                   password: ${{ env.DOCKERHUB_TOKEN }}
 
-            - name: Mirror to Docker Hub (免登录分发)
+            - name: Mirror multi-arch to Docker Hub (免登录分发)
               if: env.DOCKERHUB_TOKEN != ''
               run: |
                   set -e
                   DH="docker.io/${DOCKERHUB_USERNAME}/ms-rewards-v5"
-                  docker tag "$IMAGE:5-cn" "$DH:5-cn"
-                  docker tag "$IMAGE:5-cn" "$DH:latest"
-                  docker tag "$IMAGE:${{ steps.ver.outputs.version }}-cn" "$DH:${{ steps.ver.outputs.version }}-cn"
-                  docker push "$DH:5-cn"
-                  docker push "$DH:latest"
-                  docker push "$DH:${{ steps.ver.outputs.version }}-cn"
-                  echo "Docker Hub 已同步: ${DH}:5-cn / latest / ${{ steps.ver.outputs.version }}-cn"
+                  docker buildx imagetools create -t "$DH:5-cn" \
+                    "$IMAGE:5-cn-amd64" "$IMAGE:5-cn-arm64"
+                  docker buildx imagetools create -t "$DH:latest" \
+                    "$IMAGE:5-cn-amd64" "$IMAGE:5-cn-arm64"
+                  docker buildx imagetools create -t "$DH:${{ steps.ver.outputs.version }}-cn" \
+                    "$IMAGE:${{ steps.ver.outputs.version }}-cn-amd64" \
+                    "$IMAGE:${{ steps.ver.outputs.version }}-cn-arm64"
+                  echo "Hub 多架构已同步: ${DH}:5-cn / latest / ${{ steps.ver.outputs.version }}-cn"
+
+            - name: Inspect manifest
+              run: docker buildx imagetools inspect "$IMAGE:5-cn" | head -20 || true
 
             - name: Report
               run: |
-                  SIZE=$(docker image inspect "$IMAGE:5-cn" --format '{{.Size}}')
-                  MB=$(awk -v s="$SIZE" 'BEGIN{printf "%.0f", s/1024/1024}')
-                  echo "最终镜像: ${MB} MB（单层拍扁）"
                   {
-                    echo "### 📦 CN 瘦身镜像已发布"
+                    echo "### 📦 CN 瘦身镜像已发布（多架构）"
                     echo ""
-                    echo "- \`$IMAGE:5-cn\`"
+                    echo "- \`$IMAGE:5-cn\` → linux/amd64 + linux/arm64"
                     echo "- \`$IMAGE:${{ steps.ver.outputs.version }}-cn\`"
-                    echo "- 体积: ${MB} MB（完整版约 1370 MB）"
                     echo "- Docker Hub（免登录）: \`docker.io/${DOCKERHUB_USERNAME}/ms-rewards-v5:5-cn\`"
+                    echo "- 单架构标签：\`:5-cn-amd64\` / \`:5-cn-arm64\`"
                   } >> "$GITHUB_STEP_SUMMARY"
 
     extra-images:
-        name: Build panel & all-in-one images
-        needs: build
+        name: Build panel & all-in-one images (${{ matrix.arch }})
+        needs: merge
         runs-on: ubuntu-24.04
-        timeout-minutes: 60
-        if: ${{ needs.build.result == 'success' }}
+        timeout-minutes: 90
+        if: ${{ needs.merge.result == 'success' }}
+        strategy:
+            fail-fast: false
+            matrix:
+                arch: [amd64, arm64]
         steps:
             - uses: actions/checkout@v4
               with:
                   ref: ${{ github.sha }}
                   persist-credentials: false
-
-            - name: Read version
-              id: ver
-              run: echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
 
             - name: Read panel version
               id: pver
@@ -165,43 +235,101 @@ jobs:
               if: env.DOCKERHUB_TOKEN == ''
               run: echo "DOCKERHUB_TOKEN 未配置，跳过多镜像发布"
 
+            - uses: docker/setup-qemu-action@v3
+              if: env.DOCKERHUB_TOKEN != ''
+              with:
+                  platforms: arm64
+
+            - uses: docker/setup-buildx-action@v3
+              if: env.DOCKERHUB_TOKEN != ''
+
             - name: Login to Docker Hub
               if: env.DOCKERHUB_TOKEN != ''
               uses: docker/login-action@v3
               with:
                   registry: docker.io
                   username: ${{ env.DOCKERHUB_USERNAME }}
-                  password: ${{ env.DOCKERHUB_TOKEN }}
+                  password: ${{ secrets.DOCKERHUB_TOKEN }}
 
             - name: Build & push all-in-one image (runtime + panel)
               if: env.DOCKERHUB_TOKEN != ''
               run: |
                   set -e
                   DH="docker.io/${DOCKERHUB_USERNAME}/ms-rewards-v5"
-                  docker build -f deploy/Dockerfile.all-in-one \
+                  docker buildx build \
+                    --platform "linux/${{ matrix.arch }}" \
+                    -f deploy/Dockerfile.all-in-one \
                     --build-arg BASE="${DH}:5-cn" \
-                    -t "${DH}:5-cn-allinone" .
-                  docker push "${DH}:5-cn-allinone"
-                  echo "已推送 ${DH}:5-cn-allinone"
+                    -t "${DH}:5-cn-allinone-${{ matrix.arch }}" \
+                    --push .
+                  echo "已推送 ${DH}:5-cn-allinone-${{ matrix.arch }}"
 
             - name: Build & push all-in-one + docker CLI image
               if: env.DOCKERHUB_TOKEN != ''
               run: |
                   set -e
                   DH="docker.io/${DOCKERHUB_USERNAME}/ms-rewards-v5"
-                  docker build -f deploy/Dockerfile.all-in-one-docker \
-                    --build-arg BASE="${DH}:5-cn-allinone" \
-                    -t "${DH}:5-cn-allinone-docker" .
-                  docker push "${DH}:5-cn-allinone-docker"
-                  echo "已推送 ${DH}:5-cn-allinone-docker"
+                  docker buildx build \
+                    --platform "linux/${{ matrix.arch }}" \
+                    -f deploy/Dockerfile.all-in-one-docker \
+                    --build-arg BASE="${DH}:5-cn-allinone-${{ matrix.arch }}" \
+                    -t "${DH}:5-cn-allinone-docker-${{ matrix.arch }}" \
+                    --push .
+                  echo "已推送 ${DH}:5-cn-allinone-docker-${{ matrix.arch }}"
 
             - name: Build & push panel image
               if: env.DOCKERHUB_TOKEN != ''
               run: |
                   set -e
                   DP="docker.io/${DOCKERHUB_USERNAME}/ms-rewards-v5-panel"
-                  docker build -f panel-image/Dockerfile \
-                    -t "${DP}:latest" -t "${DP}:${{ steps.pver.outputs.version }}" .
-                  docker push "${DP}:latest"
-                  docker push "${DP}:${{ steps.pver.outputs.version }}"
-                  echo "已推送 ${DP}:latest 与 :${{ steps.pver.outputs.version }}（面板版本）"
+                  docker buildx build \
+                    --platform "linux/${{ matrix.arch }}" \
+                    -f panel-image/Dockerfile \
+                    -t "${DP}:latest-${{ matrix.arch }}" \
+                    -t "${DP}:${{ steps.pver.outputs.version }}-${{ matrix.arch }}" \
+                    --push .
+                  echo "已推送 ${DP}:latest-${{ matrix.arch }}"
+
+    merge-extra:
+        name: Merge panel & all-in-one manifests
+        needs: extra-images
+        runs-on: ubuntu-24.04
+        timeout-minutes: 20
+        if: ${{ needs.extra-images.result == 'success' }}
+        steps:
+            - uses: actions/checkout@v4
+              with:
+                  ref: ${{ github.sha }}
+                  persist-credentials: false
+
+            - name: Read panel version
+              id: pver
+              run: |
+                  v=$(sed -n 's/^VERSION = "\(.*\)"/\1/p' panel/server.py | head -1)
+                  echo "version=${v:-0.0.0}" >> "$GITHUB_OUTPUT"
+
+            - uses: docker/setup-buildx-action@v3
+
+            - name: Login to Docker Hub
+              uses: docker/login-action@v3
+              with:
+                  registry: docker.io
+                  username: ${{ env.DOCKERHUB_USERNAME }}
+                  password: ${{ env.DOCKERHUB_TOKEN }}
+
+            - name: Combine all-in-one / panel manifests
+              run: |
+                  set -e
+                  DH="docker.io/${DOCKERHUB_USERNAME}/ms-rewards-v5"
+                  DP="docker.io/${DOCKERHUB_USERNAME}/ms-rewards-v5-panel"
+                  for TAG in 5-cn-allinone 5-cn-allinone-docker; do
+                    docker buildx imagetools create -t "${DH}:${TAG}" \
+                      "${DH}:${TAG}-amd64" "${DH}:${TAG}-arm64"
+                    echo "已合并 ${DH}:${TAG}"
+                  done
+                  docker buildx imagetools create -t "${DP}:latest" \
+                    "${DP}:latest-amd64" "${DP}:latest-arm64"
+                  docker buildx imagetools create -t "${DP}:${{ steps.pver.outputs.version }}" \
+                    "${DP}:${{ steps.pver.outputs.version }}-amd64" \
+                    "${DP}:${{ steps.pver.outputs.version }}-arm64"
+                  echo "已合并 ${DP}:latest 与 :${{ steps.pver.outputs.version }}"

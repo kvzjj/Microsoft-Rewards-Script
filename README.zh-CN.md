@@ -115,6 +115,39 @@ docker run -d --name ms-rewards \
 | `ghcr.io/wangixangya/microsoft-rewards-script:5`    | 本仓库镜像（与上游一致）      |
 | `ghcr.io/wangixangya/microsoft-rewards-script:5-cn` | **国内补丁版 + 瘦身**（推荐） |
 
+### 多架构（amd64 / arm64）
+
+`:5-cn`、`:<版本>-cn` 以及 `:5-cn-allinone`、`:5-cn-allinone-docker`、面板镜像都是**多架构 manifest**，`docker pull` 会按宿主自动选架构，ARM 小主机（树莓派 4/5、RK3588、M 系列 Mac 上的 Docker）不用加 `--platform`。
+
+```bash
+# 看看 manifest 里有哪几个架构
+docker buildx imagetools inspect ghcr.io/wangixangya/microsoft-rewards-script:5-cn
+```
+
+也可以按架构拉：
+
+```bash
+docker pull ghcr.io/wangixangya/microsoft-rewards-script:5-cn-arm64   # 单架构标签
+docker pull ghcr.io/wangixangya/microsoft-rewards-script:5-cn-amd64
+```
+
+arm64 的浏览器不用自己装：patchright 会按 `debian12-arm64` 自动下载 `chrome-headless-shell-linux-arm64`，瘦身层里删 chromium / 校验 headless shell 的路径已改成通配（`chrome-headless-shell-linux*`），两种架构共用一套 Dockerfile。
+
+本地想自己出双架构镜像：
+
+```bash
+# 只构建（x86 机器上 arm64 走 QEMU，慢；产出 /tmp/msr-<arch>.oci.tar）
+./deploy/build-multiarch.sh
+
+# 构建并推到 Docker Hub（先 docker login）
+DOCKERHUB_USERNAME=yourname ./deploy/build-multiarch.sh --push
+
+# 只出 arm64
+./deploy/build-multiarch.sh --push --only arm64
+```
+
+CI 走 `.github/workflows/cn-image.yml`：先按架构并行构建 + 各自 `Dockerfile.slim` 瘦身 + `flatten-image.sh` 拍扁成单层，推 `:5-cn-<arch>`，最后 `docker buildx imagetools create` 合并成 `:5-cn`；面板与一体化镜像同理。
+
 <details>
 <summary><b>本地构建</b></summary>
 
