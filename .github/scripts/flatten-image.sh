@@ -69,14 +69,19 @@ cat "$CHANGES_FILE"
 echo "----------------------"
 rm -f "$CHANGES_FILE"
 
-CID=$(docker create "$SRC")
+# 源镜像可能是异构架构（arm64 镜像在 amd64 机器上拍扁）：create/import 都要显式带上平台，
+# 否则 import 出来的镜像会被标成宿主的 amd64，之后 docker run --platform linux/arm64 直接报 manifest unknown。
+PLATFORM=$(docker image inspect "$SRC" --format '{{.Os}}/{{.Architecture}}')
+echo "源镜像平台: $PLATFORM"
+
+CID=$(docker create --platform "$PLATFORM" "$SRC")
 trap 'docker rm -f "$CID" >/dev/null 2>&1 || true' EXIT
 
 PRIMARY=$1
 FIRST=1
 for dst in "$@"; do
     if [ "$FIRST" = "1" ]; then
-        docker export "$CID" | docker import "${ARGS[@]}" - "$dst"
+        docker export "$CID" | docker import --platform "$PLATFORM" "${ARGS[@]}" - "$dst"
         FIRST=0
     else
         docker tag "$PRIMARY" "$dst"
