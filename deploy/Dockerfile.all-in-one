@@ -18,9 +18,8 @@ LABEL org.opencontainers.image.title="ms-rewards-all-in-one" \
 ARG DEB_MIRROR=
 ARG DEB_SEC_MIRROR=
 RUN set -eux; \
-    OFFICIAL='deb http://deb.debian.org/debian bookworm main
-deb http://deb.debian.org/debian bookworm-updates main
-deb http://deb.debian.org/debian-security bookworm-security main'; \
+    OFFICIAL_MAIN=http://deb.debian.org/debian; \
+    OFFICIAL_SEC=http://deb.debian.org/debian-security; \
     use_mirror() { \
         rm -f /etc/apt/sources.list.d/*.sources /etc/apt/sources.list.d/*.list; \
         printf 'deb %s bookworm main\ndeb %s bookworm-updates main\ndeb %s bookworm-security main\n' \
@@ -28,7 +27,8 @@ deb http://deb.debian.org/debian-security bookworm-security main'; \
     }; \
     use_official() { \
         rm -f /etc/apt/sources.list.d/*.sources /etc/apt/sources.list.d/*.list; \
-        printf '%s\n' "$OFFICIAL" > /etc/apt/sources.list; \
+        printf 'deb %s bookworm main\ndeb %s bookworm-updates main\ndeb %s bookworm-security main\n' \
+            "$OFFICIAL_MAIN" "$OFFICIAL_MAIN" "$OFFICIAL_SEC" > /etc/apt/sources.list; \
     }; \
     if [ -n "$DEB_MIRROR" ]; then use_mirror "$DEB_MIRROR" "$DEB_SEC_MIRROR"; else use_official; fi; \
     if ! { apt-get update && apt-get install -y --no-install-recommends python3 curl ca-certificates; }; then \
