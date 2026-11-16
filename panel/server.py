@@ -1549,15 +1549,16 @@ def _image_local(tag):
     }
 
 
-_REMOTE_CACHE = {"at": 0, "val": None}
+_REMOTE_CACHE: dict = {}
 
 
 def _image_remote(tag, ttl=300):
     """远端镜像 manifest 摘要（需要本机已 docker login ghcr.io，失败返回 None）
-    manifest inspect 要 10~20 秒，缓存 5 分钟，避免每次打开页面都卡住。"""
+    manifest inspect 要 10~20 秒，按 tag 缓存 5 分钟，避免每次打开页面都卡住。"""
     now = time.time()
-    if now - _REMOTE_CACHE["at"] < ttl:
-        return _REMOTE_CACHE["val"]
+    cached = _REMOTE_CACHE.get(tag) or {}
+    if cached.get("val") is not None and now - cached.get("at", 0) < ttl:
+        return cached["val"]
     raw = _sh(["docker", "manifest", "inspect", tag], 25)
     if not raw:
         return None
@@ -1567,10 +1568,63 @@ def _image_remote(tag, ttl=300):
         archs = {m.get("platform", {}).get("architecture", "?") for m in ms}
         plat = ",".join(sorted(a for a in archs if a in ("amd64", "arm64", "386", "arm")))
         val = {"tag": tag, "digest": (ms[0]["digest"].replace("sha256:", "")[:12] if ms else ""), "platforms": plat}
-        _REMOTE_CACHE.update(at=time.time(), val=val)
+        _REMOTE_CACHE[tag] = {"at": time.time(), "val": val}
         return val
     except Exception:
         return None
+
+
+DEPLOYED_IMAGE_FILE = os.path.join(BASE, "deployed-image.json")
+_BADGE_KICK: dict = {"thread": None}
+
+
+OFFICIAL_IMAGE = "ghcr.io/thenetsky/microsoft-rewards-script:5"
+
+
+def deployed_image_digest():
+    """同步部署成功后记录的「官方镜像摘要」，用它判断上游有没有出新版。"""
+    try:
+        with open(DEPLOYED_IMAGE_FILE) as f:
+            d = json.load(f)
+        return str(d.get("official_digest") or d.get("digest") or "")
+    except Exception:
+        return ""
+
+
+def _kick_remote_manifest_check():
+    """首次访问时异步拉 ghcr manifest（10~20 秒），不阻塞页面。"""
+    th = _BADGE_KICK.get("thread")
+    if th and th.is_alive():
+        return
+
+    def run():
+        try:
+            _image_remote(OFFICIAL_IMAGE, ttl=0)
+        except Exception:
+            pass
+
+    t = threading.Thread(target=run, daemon=True)
+    _BADGE_KICK["thread"] = t
+    t.start()
+
+
+def update_badge():
+    """右上角「有新版本」提示用的轻量接口：只比对摘要，不做任何写操作。"""
+    remote = _image_remote(OFFICIAL_IMAGE)
+    if not remote:
+        _kick_remote_manifest_check()
+        return {"checking": True, "has_update": False, "local_version": VERSION}
+    dep = deployed_image_digest()
+    digest = remote.get("digest") or ""
+    return {
+        "checking": False,
+        "has_update": bool(dep) and bool(digest) and dep != digest,
+        "local_version": VERSION,
+        "deployed_digest": dep,
+        "remote_digest": digest,
+        "remote_tag": remote.get("tag") or OFFICIAL_IMAGE,
+        "platforms": remote.get("platforms") or "",
+    }
 
 
 def _js_info():
@@ -2260,6 +2314,12 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 pass
             return self.send_json(200, {"running": _js_running(), "log": lines})
+
+        if p == "/panel/update/badge":
+            try:
+                return self.send_json(200, update_badge())
+            except Exception as e:
+                return self.send_json(200, {"checking": False, "has_update": False, "error": str(e)})
 
         if p == "/panel/release":
             try:

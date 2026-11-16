@@ -190,6 +190,19 @@ textarea{font-family:var(--mono);font-size:12px;line-height:1.65;resize:vertical
   pointer-events:none;opacity:0;transform:translateY(2px);transition:opacity .12s ease,transform .12s ease}
 #tipbox.on{opacity:1;transform:translateY(0)}
 [data-tip]{cursor:help}
+/* 右上角「发现新版本」提示 */
+#updToast{position:fixed;top:18px;right:18px;z-index:9999;width:312px;max-width:calc(100vw - 24px);
+  background:#fff;color:var(--txt);border:1px solid var(--ink);border-radius:14px;
+  box-shadow:0 18px 44px rgba(9,9,11,.18);padding:14px 15px 13px;display:flex;flex-direction:column;gap:9px}
+#updToast[hidden]{display:none}
+#updToast .t{font-weight:600;font-size:13.5px;display:flex;align-items:center;gap:8px;padding-right:18px}
+#updToast .t .dot{width:7px;height:7px;border-radius:50%;background:var(--ink);flex:0 0 auto}
+#updToast .b{font-size:12px;color:var(--dim);line-height:1.6;font-family:var(--mono);word-break:break-all}
+#updToast .a{display:flex;gap:8px;margin-top:2px}
+#updToast .a .btn{flex:1;justify-content:center;text-align:center;padding:7px 10px;font-size:12.5px}
+#updToast .x{position:absolute;top:7px;right:9px;border:0;background:none;color:var(--dim-2);
+  font-size:17px;line-height:1;cursor:pointer;padding:2px 4px}
+#updToast .x:hover{color:var(--txt)}
 </style>
 </head>
 <body>
@@ -701,6 +714,15 @@ textarea{font-family:var(--mono);font-size:12px;line-height:1.65;resize:vertical
 
 <div class="flash" id="flash"></div>
 
+<div id="updToast" hidden>
+  <button class="x" id="updToastClose" title="关闭">×</button>
+  <div class="t"><span class="dot"></span>发现新版本</div>
+  <div class="b" id="updToastBody">—</div>
+  <div class="a">
+    <button class="btn primary" id="updToastGo">去更新</button>
+    <button class="btn" id="updToastLater">稍后</button>
+  </div>
+</div>
 <script>
 let _lastStats = 0, _prevState = null;   // 收益自动刷新的时间戳 / 上次运行状态
 const $ = s => document.querySelector(s);
@@ -2297,10 +2319,28 @@ $('#rwSave').onclick = async () => {
   $('#rwMsg').textContent = r.error ? ('保存失败：' + r.error) : '已保存自动领取设置';
 };
 
+/* 每次打开页面查一次「有没有新版本」，有就在右上角弹提示 */
+async function checkUpdateBadge() {
+  try {
+    let r = await papi('/panel/update/badge');
+    for (let i = 0; i < 10 && r && r.checking; i++) {
+      await new Promise(s => setTimeout(s, 4000));
+      r = await papi('/panel/update/badge');
+    }
+    if (!r || !r.has_update) return;
+    $('#updToastBody').textContent =
+      `上游镜像 ${r.remote_digest || '—'} · 本机部署 ${r.deployed_digest || '未知'} · 面板 v${r.local_version || ''}`;
+    $('#updToast').hidden = false;
+  } catch (e) {}
+}
+$('#updToastClose').onclick = () => { $('#updToast').hidden = true; };
+$('#updToastLater').onclick = () => { $('#updToast').hidden = true; };
+$('#updToastGo').onclick = () => { $('#updToast').hidden = true; showSection('update'); };
+
 (async () => {
   try {
     const r = await fetch('/api/status');
-    if (r.status === 200) { $('#login').style.display = 'none'; boot(); }
+    if (r.status === 200) { $('#login').style.display = 'none'; boot(); checkUpdateBadge(); }
   } catch (e) {}
 })();
 </script>
