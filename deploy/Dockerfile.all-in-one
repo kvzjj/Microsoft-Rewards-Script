@@ -11,17 +11,33 @@ LABEL org.opencontainers.image.title="ms-rewards-all-in-one" \
       org.opencontainers.image.source="https://github.com/wangixangya/Microsoft-Rewards-Script" \
       org.opencontainers.image.licenses="MIT"
 
-# Debian 源换国内镜像（--build-arg DEB_MIRROR=... 覆盖；留空则用官方源）
-ARG DEB_MIRROR=https://mirrors.ustc.edu.cn/debian
-ARG DEB_SEC_MIRROR=https://mirrors.ustc.edu.cn/debian-security
-RUN if [ -n "$DEB_MIRROR" ]; then \
+# Debian 源：默认走官方源（GitHub Actions runner 与国内都能通）；
+# 国内自建想加速就传 --build-arg DEB_MIRROR=https://mirrors.aliyun.com/debian。
+# 指定了镜像源时，update+install 任一失败就自动回落官方源——
+# 注意 apt-get update 在“拿不到索引”时可能仍返回 0，所以把 install 一起放进判断条件。
+ARG DEB_MIRROR=
+ARG DEB_SEC_MIRROR=
+RUN set -eux; \
+    OFFICIAL='deb http://deb.debian.org/debian bookworm main
+deb http://deb.debian.org/debian bookworm-updates main
+deb http://deb.debian.org/debian-security bookworm-security main'; \
+    use_mirror() { \
         rm -f /etc/apt/sources.list.d/*.sources /etc/apt/sources.list.d/*.list; \
         printf 'deb %s bookworm main\ndeb %s bookworm-updates main\ndeb %s bookworm-security main\n' \
-            "$DEB_MIRROR" "$DEB_MIRROR" "$DEB_SEC_MIRROR" > /etc/apt/sources.list; \
-    fi \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends python3 curl ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+            "$1" "$1" "$2" > /etc/apt/sources.list; \
+    }; \
+    use_official() { \
+        rm -f /etc/apt/sources.list.d/*.sources /etc/apt/sources.list.d/*.list; \
+        printf '%s\n' "$OFFICIAL" > /etc/apt/sources.list; \
+    }; \
+    if [ -n "$DEB_MIRROR" ]; then use_mirror "$DEB_MIRROR" "$DEB_SEC_MIRROR"; else use_official; fi; \
+    if ! { apt-get update && apt-get install -y --no-install-recommends python3 curl ca-certificates; }; then \
+        echo "源不可用，回落 deb.debian.org"; \
+        use_official; \
+        apt-get update; \
+        apt-get install -y --no-install-recommends python3 curl ca-certificates; \
+    fi; \
+    rm -rf /var/lib/apt/lists/*
 
 # 面板代码（只读）+ 一体化入口
 COPY panel/ /opt/panel-app/

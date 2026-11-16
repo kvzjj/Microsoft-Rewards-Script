@@ -7,12 +7,22 @@ LABEL org.opencontainers.image.title="ms-rewards-panel" \
       org.opencontainers.image.source="https://github.com/wangixangya/Microsoft-Rewards-Script" \
       org.opencontainers.image.licenses="MIT"
 
-# 国内构建：Alpine 源换镜像（--build-arg APK_MIRROR=... 可覆盖）
-ARG APK_MIRROR=https://mirrors.aliyun.com/alpine
-RUN sed -i "s|https://dl-cdn.alpinelinux.org/alpine|${APK_MIRROR}|g" /etc/apk/repositories \
-    && apk add --no-cache --no-progress tzdata ca-certificates curl docker-cli \
-    && cp /usr/share/zoneinfo/Asia/Shanghai /etc/localtime \
-    && echo "Asia/Shanghai" > /etc/timezone
+# Alpine 源：默认官方 CDN；国内自建可传 --build-arg APK_MIRROR=https://mirrors.aliyun.com/alpine。
+# 指定镜像源时 update+add 失败会自动回落官方，避免一个源被墙/被挡就让整个 job 挂掉。
+ARG APK_MIRROR=
+RUN set -eux; \
+    if [ -n "$APK_MIRROR" ]; then \
+        sed -i "s|https://dl-cdn.alpinelinux.org/alpine|${APK_MIRROR}|g" /etc/apk/repositories; \
+    fi; \
+    if ! { apk update --no-progress && apk add --no-cache --no-progress tzdata ca-certificates curl docker-cli; }; then \
+        echo "Alpine 源不可用，回落 dl-cdn.alpinelinux.org"; \
+        [ -n "$APK_MIRROR" ] && sed -i "s|${APK_MIRROR}|https://dl-cdn.alpinelinux.org/alpine|g" /etc/apk/repositories; \
+        sed -i "s|^https://[^/]*/alpine|https://dl-cdn.alpinelinux.org/alpine|g" /etc/apk/repositories; \
+        apk update --no-progress; \
+        apk add --no-cache --no-progress tzdata ca-certificates curl docker-cli; \
+    fi; \
+    cp /usr/share/zoneinfo/Asia/Shanghai /etc/localtime; \
+    echo "Asia/Shanghai" > /etc/timezone
 
 # 代码放只读位置，运行期数据放 /opt/data（可挂卷持久化）
 COPY panel/ /opt/panel-app/
