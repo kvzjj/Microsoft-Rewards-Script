@@ -23,12 +23,16 @@ BUILDER="multiarch"
 PLATFORMS="linux/amd64,linux/arm64"
 PUSH=0
 ONLY=""
+LOCAL_REGISTRY=0
+REG_PORT=5000
 
 while [ $# -gt 0 ]; do
     case "$1" in
         --push) PUSH=1 ;;
         --only) ONLY="$2"; shift ;;
         --image) IMAGE="$2"; shift ;;
+        --local-registry) LOCAL_REGISTRY=1 ;;
+        --port) REG_PORT="$2"; shift ;;
         -h|--help) sed -n '2,20p' "$0"; exit 0 ;;
         *) echo "未知参数: $1"; exit 1 ;;
     esac
@@ -60,9 +64,37 @@ node .github/scripts/patch-bing-origin.js >/dev/null
 grep -q 'export function isBingHost' src/constants/urls.ts && echo "   isBingHost 就位"
 
 echo "== 4/5 构建运行时镜像（${PLATFORMS}）"
+DOCKERFILE="-f Dockerfile"
+if [ "$LOCAL_REGISTRY" = "1" ]; then
+    # 国内直连 registry-1.docker.io 常被 IPv6 卡死：先把基础镜像拉下来塞进本机 registry，
+    # 再让 buildkit 从 localhost 取，Dockerfile 只替换 FROM 行。
+    BASE_IMAGE="node:24-bookworm-slim"
+    echo "   --local-registry: 准备 localhost:${REG_PORT} 与基础镜像 ${BASE_IMAGE}"
+    if ! docker ps --format '{{.Names}}' | grep -qx 'reg'; then
+        docker run -d --name reg -p "127.0.0.1:${REG_PORT}:5000" --restart unless-stopped registry:2 >/dev/null
+        sleep 3
+    fi
+    for P in ${PLATFORMS//,/ }; do
+        docker pull --platform "$P" "$BASE_IMAGE" >/dev/null
+        docker tag "$BASE_IMAGE" "localhost:${REG_PORT}/${BASE_IMAGE}"
+        docker push "localhost:${REG_PORT}/${BASE_IMAGE}" >/dev/null
+    done
+    if [ ! -f /root/.config/buildkit/buildkitd.toml ]; then
+        mkdir -p /root/.config/buildkit
+        printf '[registry."localhost:%s"]\n  http = true\n  insecure = true\n' "$REG_PORT" > /root/.config/buildkit/buildkitd.toml
+    fi
+    sed "s|^FROM ${BASE_IMAGE}|FROM localhost:${REG_PORT}/${BASE_IMAGE}|" Dockerfile > /tmp/Dockerfile.arm64
+    DOCKERFILE="-f /tmp/Dockerfile.arm64"
+    docker buildx rm "$BUILDER" >/dev/null 2>&1 || true
+    docker buildx create --name "$BUILDER" --driver docker-container --driver-opt network=host \
+        --config /root/.config/buildkit/buildkitd.toml >/dev/null
+    docker buildx use "$BUILDER"
+    docker buildx inspect "$BUILDER" --bootstrap >/dev/null
+fi
+
 if [ "$PUSH" = "1" ]; then
     docker buildx build --builder "$BUILDER" --platform "$PLATFORMS" \
-        -f Dockerfile -t "${IMAGE}:5-cn" -t "${IMAGE}:${VERSION}-cn" --push .
+        $DOCKERFILE -t "${IMAGE}:5-cn" -t "${IMAGE}:${VERSION}-cn" --push .
 else
     # 本地不 push 时按架构分别输出 OCI 目录，避免 classic docker 无法 load 异构镜像
     for P in ${PLATFORMS//,/ }; do
@@ -70,7 +102,7 @@ else
         OUT="/tmp/msr-${ARCH}.oci.tar"
         echo "   -> ${ARCH} 输出到 ${OUT}"
         docker buildx build --builder "$BUILDER" --platform "$P" \
-            -f Dockerfile -t "msr:${ARCH}" --output "type=oci,dest=${OUT}" .
+            $DOCKERFILE -t "msr:${ARCH}" --output "type=oci,dest=${OUT}" .
     done
 fi
 
