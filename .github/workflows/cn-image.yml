@@ -93,6 +93,7 @@ jobs:
                   context: .
                   push: false
                   load: true
+                  provenance: false
                   platforms: linux/${{ matrix.arch }}
                   tags: local/msr:cn-build
                   cache-from: type=gha,version=2,scope=cn-image-${{ matrix.arch }}
@@ -257,6 +258,7 @@ jobs:
                   set -e
                   DH="docker.io/${DOCKERHUB_USERNAME}/ms-rewards-v5"
                   docker buildx build \
+                    --provenance=false \
                     --platform "linux/${{ matrix.arch }}" \
                     -f deploy/Dockerfile.all-in-one \
                     --build-arg BASE="${DH}:5-cn" \
@@ -270,6 +272,7 @@ jobs:
                   set -e
                   DH="docker.io/${DOCKERHUB_USERNAME}/ms-rewards-v5"
                   docker buildx build \
+                    --provenance=false \
                     --platform "linux/${{ matrix.arch }}" \
                     -f deploy/Dockerfile.all-in-one-docker \
                     --build-arg BASE="${DH}:5-cn-allinone-${{ matrix.arch }}" \
@@ -283,6 +286,7 @@ jobs:
                   set -e
                   DP="docker.io/${DOCKERHUB_USERNAME}/ms-rewards-v5-panel"
                   docker buildx build \
+                    --provenance=false \
                     --platform "linux/${{ matrix.arch }}" \
                     -f panel-image/Dockerfile \
                     -t "${DP}:latest-${{ matrix.arch }}" \
