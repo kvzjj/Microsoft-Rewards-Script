@@ -2,6 +2,9 @@ import { requestError } from './http.js'
 import { accountIndexesFromEnv, envStrFrom, normalizeGeoLocale, normalizeLanguageCode } from '../../scripts/lib/env.js'
 import { normalizeAccountLevel } from '../rewards/shared/parsers/NormalizeRewards.js'
 
+/** Per-account run statuses that represent a real failure (not a partially completed run). */
+const FAILED_STATUSES = new Set(['failed', 'cancelled'])
+
 function sanitizeProxyUrl(value) {
     try {
         const url = new URL(value)
@@ -212,7 +215,12 @@ export function mergeAccountStats(accounts, runs, liveAccounts = []) {
             lastRunAt: last?.when ?? null,
             lastCollected: last?.pointsKnown === false ? null : (last?.collected ?? null),
             lastSuccess: last ? last.success : null,
-            lastError: last?.error ?? null,
+            lastStatus: last?.status ?? null,
+            lastReason: last?.error ?? null,
+            // A partial run still reports its unconfirmed activities through `reason`, but it is not a
+            // failure: consumers (panel, dashboards) turned that string into a red "异常" badge even
+            // though the run earned points. Keep lastError for real failures only.
+            lastError: FAILED_STATUSES.has(String(last?.status)) ? (last?.error ?? null) : null,
             lastCompletion: last?.completion ?? null,
             lastPointsBySource: last?.bySource ?? null,
             streaks: observations.find(account => account.streaks?.length)?.streaks ?? [],
