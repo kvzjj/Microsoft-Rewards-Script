@@ -1,0 +1,38 @@
+# 本仓库自建部署（一体化单容器：运行时 + 中文面板 + docker CLI）
+#
+# 覆盖在原部署之上：镜像换成用本仓库 panel/ 构建的 ms-rewards:local，
+# 面板修复（partial 状态不再显示为「异常」等）才不会被镜像更新覆盖。
+#
+# 用法（在仓库根目录执行；--env-file 让 ${API_TOKEN} 等占位符取到值）：
+#   docker build -f deploy/local/Dockerfile -t ms-rewards:local .
+#   cp deploy/local/env.example .env    # 填 API_TOKEN / PANEL_PASSWORD
+#   docker compose --env-file .env -f deploy/local/compose.yaml up -d
+#
+# 注意：docker.sock 只挂给需要「在面板里重建容器 / 更新镜像」的场景；
+# 不需要的话删掉那一行与 entrypoint 无关，但面板的重建按钮会不可用。
+services:
+    ms-rewards:
+        image: ${MS_REWARDS_IMAGE:-ms-rewards:local}
+        container_name: ms-rewards
+        restart: unless-stopped
+        stop_grace_period: 60s
+        env_file:
+            - ../../.env
+        environment:
+            TZ: ${TZ:-Asia/Shanghai}
+            NODE_ENV: production
+            API_TOKEN: ${API_TOKEN:?请在 .env 中设置 API_TOKEN（openssl rand -hex 24）}
+            PANEL_PASSWORD: ${PANEL_PASSWORD:-admin}
+            RUN_ON_START: ${RUN_ON_START:-false}
+            CRON_SCHEDULE: ${CRON_SCHEDULE:-0 7 * * *}
+        ports:
+            - '${PANEL_PORT:-5310}:5310'
+        volumes:
+            - ../../config:/usr/src/microsoft-rewards-script/config
+            - ../../sessions:/usr/src/microsoft-rewards-script/sessions
+            - ../../diagnostics:/usr/src/microsoft-rewards-script/diagnostics
+            - ms-panel-data:/opt/data
+            - /var/run/docker.sock:/var/run/docker.sock
+
+volumes:
+    ms-panel-data:
